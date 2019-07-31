@@ -112,11 +112,35 @@ Var /GLOBAL BindRequirementsURL
 Var /GLOBAL BindRequirementsError
 Var /GLOBAL BitcoinJRequirementsMet
 Var /GLOBAL BitcoinJRequirementsError
+Var /GLOBAL FirefoxDetected
+Var /GLOBAL Firefox32Detected
+Var /GLOBAL Firefox64Detected
+Var /GLOBAL FirefoxCurrentVersion
+Var /GLOBAL FirefoxInstallDirectoryRegistryKey
+Var /GLOBAL FirefoxInstallDirectoryBackSlashes
+Var /GLOBAL FirefoxInstallDirectoryForwardSlashes
+Var /GLOBAL FirefoxProfileINI
+Var /GLOBAL FirefoxProfileNumber
+Var /GLOBAL FirefoxIsDefaultProfile
+Var /GLOBAL FirefoxIsRelativeProfile
+Var /GLOBAL FirefoxRawProfileDirectoryBackSlashes
+Var /GLOBAL FirefoxRawProfileDirectoryForwardSlashes
+Var /GLOBAL FirefoxProfileDirectoryBackSlashes
+Var /GLOBAL FirefoxProfileDirectoryForwardSlashes
+Var /GLOBAL FirefoxTempDBDirectoryBackSlashes
+Var /GLOBAL FirefoxTempDBDirectoryForwardSlashes
+Var /GLOBAL FirefoxError
+Var /GLOBAL Firefox32Error
+Var /GLOBAL Firefox64Error
+Var /GLOBAL FirefoxRejected
 
 # PRELAUNCH CHECKS
 ##############################################################################
 !Include WinVer.nsh
 !include x64.nsh
+
+!include "StrFunc.nsh"
+${StrRep}
 
 Function .onInit
   ${IfNot} ${AtLeastWinVista}
@@ -144,6 +168,7 @@ Function .onInit
   Call DetectVC2015_x86_64
   Call DetectBindRequirements
   Call DetectBitcoinJRequirements
+  Call DetectFirefoxAnyArch
 
   Call FailIfBindRequirementsNotMet
 FunctionEnd
@@ -399,6 +424,165 @@ Function DetectBitcoinJRequirements
   Pop $BitcoinJRequirementsMet
 FunctionEnd
 
+Function DetectFirefoxAnyArch
+  # Check for 64-bit Firefox requirements
+  # Visual C++ 2010 Redistributable is needed by Tor's certutil binaries
+  ${If} $VC2010_x86_64Detected == 0
+    StrCpy $Firefox64Error "Microsoft Visual C++ 2010 Redistributable Package must be installed"
+    Goto not_64
+  ${EndIf}
+  # Visual C++ 2015 Redistributable is needed by Mozilla's CKBI binaries
+  ${If} $VC2015_x86_64Detected == 0
+    StrCpy $Firefox64Error "Microsoft Visual C++ 2015 Redistributable Package must be installed"
+    Goto not_64
+  ${EndIf}
+
+  # Check for 64-bit Firefox
+  ${If} ${RunningX64}
+    SetRegView 64
+    Call DetectFirefoxSingleArch
+    SetRegView lastused
+
+    ${If} $FirefoxDetected == 1
+      StrCpy $Firefox32Detected 0
+      StrCpy $Firefox64Detected 1
+
+      StrCpy $Firefox32Error "64-bit Firefox was detected and took priority"
+
+      Return
+    ${Else}
+      StrCpy $Firefox64Error "$FirefoxError"
+    ${EndIf}
+  ${Else}
+    StrCpy $Firefox64Error "Not running a 64-bit OS"
+  ${EndIf}
+
+not_64:
+
+  # Check for 32-bit Firefox requirements
+  # Visual C++ 2010 Redistributable is needed by Tor's certutil binaries
+  ${If} $VC2010_x86_32Detected == 0
+    StrCpy $Firefox32Error "Microsoft Visual C++ 2010 Redistributable Package must be installed"
+    Goto not_32
+  ${EndIf}
+  # Visual C++ 2015 Redistributable is needed by Mozilla's CKBI binaries
+  ${If} $VC2015_x86_32Detected == 0
+    StrCpy $Firefox32Error "Microsoft Visual C++ 2015 Redistributable Package must be installed"
+    Goto not_32
+  ${EndIf}
+
+  # Check for 32-bit Firefox
+  SetRegView 32
+  Call DetectFirefoxSingleArch
+  SetRegView lastused
+
+  ${If} $FirefoxDetected == 1
+    StrCpy $Firefox32Detected 1
+    StrCpy $Firefox64Detected 0
+    Return
+  ${Else}
+    StrCpy $Firefox32Error "$FirefoxError"
+  ${EndIf}
+
+not_32:
+
+  # At this point, Firefox wasn't detected at all
+  StrCpy $Firefox32Detected 0
+  StrCpy $Firefox64Detected 0
+FunctionEnd
+
+Function DetectFirefoxSingleArch
+  # Check Firefox version
+  ClearErrors
+  ReadRegStr $FirefoxCurrentVersion HKLM "SOFTWARE\Mozilla\Mozilla Firefox" "CurrentVersion"
+  IfErrors versionerror 0
+
+  # Check Firefox install directory
+  StrCpy $FirefoxInstallDirectoryRegistryKey "SOFTWARE\Mozilla\Mozilla Firefox\$FirefoxCurrentVersion\Main"
+  ReadRegStr $FirefoxInstallDirectoryBackSlashes HKLM "$FirefoxInstallDirectoryRegistryKey" "Install Directory"
+  ${StrRep} $FirefoxInstallDirectoryForwardSlashes "$FirefoxInstallDirectoryBackSlashes" "\" "/"
+  IfErrors installdirectoryerror 0
+
+  # We need the current user's $APPDATA for accessing the Firefox profile.
+  SetShellVarContext current
+
+  # Try Profile 0
+  Push 0
+  Pop $FirefoxProfileNumber
+
+  # Get the info for Profile
+  StrCpy $FirefoxProfileINI "$APPDATA\Mozilla\Firefox\profiles.ini"
+  ReadINIStr $FirefoxIsDefaultProfile "$FirefoxProfileINI" "Profile$FirefoxProfileNumber" "Default"
+  ReadINIStr $FirefoxIsRelativeProfile "$FirefoxProfileINI" "Profile$FirefoxProfileNumber" "IsRelative"
+  ReadINIStr $FirefoxRawProfileDirectoryForwardSlashes "$FirefoxProfileINI" "Profile$FirefoxProfileNumber" "Path"
+  IfErrors profileinierror 0
+
+  # Fail if Profile 0 isn't the default or isn't relative.
+  # In the future maybe we'll support those edge cases.
+  ${If} "$FirefoxIsDefaultProfile" != "1"
+    Goto profiledefaulterror
+  ${EndIf}
+  ${If} "$FirefoxIsRelativeProfile" != "1"
+    Goto profilerelativeerror
+  ${EndIf}
+
+  # Get the profile directory
+  ${StrRep} $FirefoxRawProfileDirectoryBackSlashes "$FirefoxRawProfileDirectoryForwardSlashes" "/" "\"
+  StrCpy $FirefoxProfileDirectoryBackSlashes "$APPDATA\Mozilla\Firefox\$FirefoxRawProfileDirectoryBackSlashes"
+  ${StrRep} $FirefoxProfileDirectoryForwardSlashes "$FirefoxProfileDirectoryBackSlashes" "\" "/"
+
+  # Make sure the profile directory has an NSS sqlite database in it
+  IfFileExists "$FirefoxProfileDirectoryBackSlashes\cert9.db" 0 cert9error
+  IfFileExists "$FirefoxProfileDirectoryBackSlashes\key4.db" 0 key4error
+  IfFileExists "$FirefoxProfileDirectoryBackSlashes\pkcs11.txt" 0 pkcs11error
+
+  Push 1
+  Pop $FirefoxDetected
+
+  Goto restoreappdata
+
+versionerror:
+  StrCpy $FirefoxError "Couldn't detect Firefox version"
+  Goto absent
+
+installdirectoryerror:
+  StrCpy $FirefoxError "Couldn't detect Firefox install directory from registry key $FirefoxInstallDirectoryRegistryKey"
+  Goto absent
+
+profileinierror:
+  StrCpy $FirefoxError "Couldn't read Firefox profile INI from $FirefoxProfileINI"
+  Goto absent
+
+profiledefaulterror:
+  StrCpy $FirefoxError "Firefox profile 0 is not default: Default=$FirefoxIsDefaultProfile"
+  Goto absent
+
+profilerelativeerror:
+  StrCpy $FirefoxError "Firefox profile 0 is not relative: IsRelative=$FirefoxIsRelativeProfile"
+  Goto absent
+
+cert9error:
+  StrCpy $FirefoxError "cert9.db is missing from Firefox profile in $FirefoxProfileDirectoryBackSlashes"
+  Goto absent
+
+key4error:
+  StrCpy $FirefoxError "key4.db is missing from Firefox profile in $FirefoxProfileDirectoryBackSlashes"
+  Goto absent
+
+pkcs11error:
+  StrCpy $FirefoxError "pkcs11.txt is missing from Firefox profile in $FirefoxProfileDirectoryBackSlashes"
+  Goto absent
+
+absent:
+  Push 0
+  Pop $FirefoxDetected
+
+restoreappdata:
+  # Restore SetShellVarContext
+  SetShellVarContext all
+
+FunctionEnd
+
 # DIALOG HELPERS
 ##############################################################################
 Function ShowCallback
@@ -471,6 +655,7 @@ Section "ncdns" Sec_ncdns
   Call BitcoinJ
   Call TrustConfig
   Call FilesSecurePre
+  Call TLSFirefoxConfig
   Call KeyConfig
   Call FilesSecure
   Call ServiceStart
@@ -548,6 +733,18 @@ Function LogRequirementsChecks
     DetailPrint "BitcoinJ can be installed."
   ${Else}
     DetailPrint "$BitcoinJRequirementsError before BitcoinJ can be installed."
+  ${EndIf}
+
+  ${If} $Firefox32Detected == 1
+    DetailPrint "Firefox 32-bit was detected."
+  ${Else}
+    DetailPrint "Firefox 32-bit was not detected: $Firefox32Error"
+  ${EndIf}
+
+  ${If} $Firefox64Detected == 1
+    DetailPrint "Firefox 64-bit was detected."
+  ${Else}
+    DetailPrint "Firefox 64-bit was not detected: $Firefox64Error"
   ${EndIf}
 FunctionEnd
 
@@ -829,6 +1026,7 @@ Function Files
   File /oname=$INSTDIR\namecoin.ico media\namecoin.ico
   File /oname=$INSTDIR\bin\ncdns.exe ${ARTIFACTS}\ncdns.exe
   File /oname=$INSTDIR\etc\ncdns.conf ${NEUTRAL_ARTIFACTS}\ncdns.conf
+  CreateDirectory $INSTDIR\etc\ncdns.conf.d
 
   File /oname=$INSTDIR\bin\dnssec-keygen.exe ${ARTIFACTS}\dnssec-keygen.exe
   File /oname=$INSTDIR\bin\libisc.dll ${ARTIFACTS}\libisc.dll
@@ -869,6 +1067,7 @@ Function FilesSecure
   # Ensure only ncdns service and administrators can read ncdns.conf.
   Call FilesSecurePre
   nsExec::ExecToLog 'icacls "$INSTDIR\etc\ncdns.conf" /reset'
+  nsExec::ExecToLog 'icacls "$INSTDIR\etc\ncdns.conf.d" /reset /T'
   nsExec::ExecToLog 'icacls "$INSTDIR\etc\zsk" /reset'
   nsExec::ExecToLog 'icacls "$INSTDIR\etc\zsk\bit.private" /reset'
   nsExec::ExecToLog 'icacls "$INSTDIR\etc\zsk\bit.key" /reset'
@@ -889,7 +1088,27 @@ Function un.Files
   Delete $INSTDIR\bin\generate_nmc_cert.exe
   Delete $INSTDIR\bin\q.exe
 
+  Delete $INSTDIR\bin\mar-tools-32\nss-certutil.exe
+  Delete $INSTDIR\bin\mar-tools-32\freebl3.dll
+  Delete $INSTDIR\bin\mar-tools-32\mozglue.dll
+  Delete $INSTDIR\bin\mar-tools-32\nss3.dll
+  Delete $INSTDIR\bin\mar-tools-32\nssdbm3.dll
+  Delete $INSTDIR\bin\mar-tools-32\softokn3.dll
+  RMDir $INSTDIR\bin\mar-tools-32
+
+  !ifdef NCDNS_64BIT
+    Delete $INSTDIR\bin\mar-tools-64\nss-certutil.exe
+    Delete $INSTDIR\bin\mar-tools-64\freebl3.dll
+    Delete $INSTDIR\bin\mar-tools-64\mozglue.dll
+    Delete $INSTDIR\bin\mar-tools-64\nss3.dll
+    Delete $INSTDIR\bin\mar-tools-64\nssdbm3.dll
+    Delete $INSTDIR\bin\mar-tools-64\softokn3.dll
+    RMDir $INSTDIR\bin\mar-tools-64
+  !endif
+
   Delete $INSTDIR\etc\ncdns.conf
+  Delete $INSTDIR\etc\ncdns.conf.d\tls-negative-firefox.conf
+  Delete $INSTDIR\etc\ncdns.conf.d\tls-positive-firefox.conf
   Delete $INSTDIR\etc\ksk\bit.private
   Delete $INSTDIR\bit.key
   Delete $INSTDIR\etc\zsk\bit.private
@@ -897,6 +1116,8 @@ Function un.Files
   RMDir $INSTDIR\bin
   RMDir $INSTDIR\etc\ksk
   RMDir $INSTDIR\etc\zsk
+  RMDir $INSTDIR\etc\ncdns.conf.d
+  RMDir $INSTDIR\etc\nss-temp-db
   RMDir $INSTDIR\etc
   Delete $INSTDIR\namecoin.ico
   Delete $INSTDIR\uninst.exe
@@ -1159,6 +1380,108 @@ Function un.TrustInjectionConfig
   Delete $PLUGINSDIR\regperm.ps1
 FunctionEnd
 
+# CONFIGURATION FOR FIREFOX TLS
+##############################################################################
+Function TLSFirefoxConfig
+  # No-op if Firefox not detected.
+  ${If} ${RunningX64}
+    ${If} $Firefox64Detected == 0
+      DetailPrint "*** Skipping Firefox config on 64-bit OS because Firefox 64-bit was not detected"
+      Return
+    ${EndIf}
+  ${Else}
+    ${If} $Firefox32Detected == 0
+      DetailPrint "*** Skipping Firefox config on 32-bit OS because Firefox 32-bit was not detected"
+      Return
+    ${EndIf}
+  ${EndIf}
+
+  ${If} $UseSPV == ${BST_CHECKED}
+    DetailPrint "*** Skipping Firefox config because Firefox is not compatible with ConsensusJ-Namecoin yet"
+    Return
+  ${EndIf}
+
+  # Prompt user.
+  MessageBox MB_ICONQUESTION|MB_YESNO "You currently have Mozilla Firefox installed.  ncdns can enable HTTPS for Namecoin websites in Firefox.  This will protect your communications with Namecoin-enabled websites from being easily wiretapped or tampered with in transit.  Doing this requires giving ncdns permission to modify Firefox's profile folder.  ncdns will use this permission to add certificate overrides for legitimate self-signed Namecoin TLS certificates, and to apply name constraints that prevent public certificate authorities from issuing Namecoin TLS certificates.  ncdns will not intentionally do anything else with this permission, but if an attacker were able to exploit ncdns, they might be able to compromise your Firefox installation.$\n$\nWould you like to enable HTTPS for Namecoin websites in Firefox?" /SD IDNO IDYES chose_yes IDNO chose_no
+
+chose_no:
+  DetailPrint "*** Skipping Firefox config because user elected not to configure Firefox"
+  StrCpy $FirefoxRejected 1
+  Return
+
+chose_yes:
+  DetailPrint "*** User elected to configure Firefox"
+  StrCpy $FirefoxRejected 0
+
+  DetailPrint "*** Firefox: Installing 32-bit mar-tools"
+  CreateDirectory $INSTDIR\bin\mar-tools-32
+  File /oname=$INSTDIR\bin\mar-tools-32\nss-certutil.exe ${ARTIFACTS}\mar-tools-32\nss-certutil.exe
+  File /oname=$INSTDIR\bin\mar-tools-32\freebl3.dll ${ARTIFACTS}\mar-tools-32\freebl3.dll
+  File /oname=$INSTDIR\bin\mar-tools-32\mozglue.dll ${ARTIFACTS}\mar-tools-32\mozglue.dll
+  File /oname=$INSTDIR\bin\mar-tools-32\nss3.dll ${ARTIFACTS}\mar-tools-32\nss3.dll
+  File /oname=$INSTDIR\bin\mar-tools-32\nssdbm3.dll ${ARTIFACTS}\mar-tools-32\nssdbm3.dll
+  File /oname=$INSTDIR\bin\mar-tools-32\softokn3.dll ${ARTIFACTS}\mar-tools-32\softokn3.dll
+
+  !ifdef NCDNS_64BIT
+    DetailPrint "*** Firefox: Installing 64-bit mar-tools"
+    CreateDirectory $INSTDIR\bin\mar-tools-64
+    File /oname=$INSTDIR\bin\mar-tools-64\nss-certutil.exe ${ARTIFACTS}\mar-tools-64\nss-certutil.exe
+    File /oname=$INSTDIR\bin\mar-tools-64\freebl3.dll ${ARTIFACTS}\mar-tools-64\freebl3.dll
+    File /oname=$INSTDIR\bin\mar-tools-64\mozglue.dll ${ARTIFACTS}\mar-tools-64\mozglue.dll
+    File /oname=$INSTDIR\bin\mar-tools-64\nss3.dll ${ARTIFACTS}\mar-tools-64\nss3.dll
+    File /oname=$INSTDIR\bin\mar-tools-64\nssdbm3.dll ${ARTIFACTS}\mar-tools-64\nssdbm3.dll
+    File /oname=$INSTDIR\bin\mar-tools-64\softokn3.dll ${ARTIFACTS}\mar-tools-64\softokn3.dll
+  !endif
+
+  DetailPrint "*** Firefox: Calculating temporary DB directory..."
+  StrCpy $FirefoxTempDBDirectoryBackSlashes "$INSTDIR\etc\nss-temp-db"
+  DetailPrint "*** Firefox: Temporary DB directory (backslash format) is $FirefoxTempDBDirectoryBackSlashes"
+  ${StrRep} $FirefoxTempDBDirectoryForwardSlashes "$FirefoxTempDBDirectoryBackSlashes" "\" "/"
+  DetailPrint "*** Firefox: Temporary DB directory (forward-slash format) is $FirefoxTempDBDirectoryForwardSlashes"
+
+  DetailPrint "*** Firefox: Creating temporary DB directory $FirefoxTempDBDirectoryBackSlashes"
+  CreateDirectory "$FirefoxTempDBDirectoryBackSlashes"
+  DetailPrint "*** Firefox: Granting ncdns modify permission for temporary DB directory $FirefoxTempDBDirectoryBackSlashes"
+  nsExec::ExecToLog 'icacls "$FirefoxTempDBDirectoryBackSlashes" /inheritance:r /T /grant "NT SERVICE\ncdns:(OI)(CI)M" "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"'
+
+  DetailPrint "*** Firefox: Granting ncdns modify permission for Firefox profile directory $FirefoxProfileDirectoryBackSlashes"
+  # TODO: can we restrict this to only cert_override.txt and the NSS DB files?
+  # Note: we don't use /inheritance:r here because it would prevent normal users from using Firefox.
+  nsExec::ExecToLog 'icacls "$FirefoxProfileDirectoryBackSlashes" /T /grant "NT SERVICE\ncdns:(OI)(CI)M"'
+
+  DetailPrint "*** Firefox: Granting ncdns read permission for CKBI in Firefox install directory $FirefoxInstallDirectoryBackSlashes"
+  # Note: we don't use /inheritance:r here because it would prevent normal users from using Firefox.
+  nsExec::ExecToLog 'icacls "$FirefoxInstallDirectoryBackSlashes" /T /grant "NT SERVICE\ncdns:(OI)(CI)R"'
+
+  DetailPrint "*** Firefox: Granting ncdns read permission for Firefox version in Windows registry"
+  File /oname=$PLUGINSDIR\regpermfirefoxversion.ps1 regpermfirefoxversion.ps1
+  FileOpen $4 "$PLUGINSDIR\regpermfirefoxversion.cmd" w
+  FileWrite $4 'powershell -executionpolicy bypass -noninteractive -file "$PLUGINSDIR\regpermfirefoxversion.ps1" install < nul'
+  FileClose $4
+  nsExec::ExecToLog '"$PLUGINSDIR\regpermfirefoxversion.cmd"'
+  Delete $PLUGINSDIR\regpermfirefoxversion.cmd
+  Delete $PLUGINSDIR\regpermfirefoxversion.ps1
+
+  # Write the ncdns config for TLS/Negative/Firefox
+  DetailPrint "*** Firefox: Creating tls-negative-firefox.conf"
+  File /oname=$INSTDIR\etc\ncdns.conf.d\tls-negative-firefox.conf ${NEUTRAL_ARTIFACTS}\tls-negative-firefox.conf
+  FileOpen $4 "$INSTDIR\etc\ncdns.conf.d\tls-negative-firefox.conf" a
+  FileSeek $4 0 END
+  FileWrite $4 'nss-ckbi-dir="$FirefoxInstallDirectoryForwardSlashes"$\r$\n'
+  FileWrite $4 'nss-temp-db-dir="$FirefoxTempDBDirectoryForwardSlashes"$\r$\n'
+  FileWrite $4 'nss-dest-db-dir="$FirefoxProfileDirectoryForwardSlashes"$\r$\n'
+  FileClose $4
+
+  # Write the ncdns config for TLS/Positive/Firefox
+  DetailPrint "*** Firefox: Creating tls-positive-firefox.conf"
+  File /oname=$INSTDIR\etc\ncdns.conf.d\tls-positive-firefox.conf ${NEUTRAL_ARTIFACTS}\tls-positive-firefox.conf
+  FileOpen $4 "$INSTDIR\etc\ncdns.conf.d\tls-positive-firefox.conf" a
+  FileSeek $4 0 END
+  FileWrite $4 'profiledir="$FirefoxProfileDirectoryForwardSlashes"$\r$\n'
+  FileClose $4
+
+  DetailPrint "*** Firefox: Finished configuration"
+FunctionEnd
 
 #
 ##############################################################################
